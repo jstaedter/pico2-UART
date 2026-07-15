@@ -1,19 +1,28 @@
 name: CI
 
 on:
-  - push
-  - pull_request
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
 
 jobs:
-  CI:
+  build:
+    name: Build for ${{ matrix.board }}
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        # Baut automatisch 2 Varianten: Für RP2040 (pico) und RP2350 (pico2)
+        board: [pico, pico2] 
+
     steps:
       - name: 'Check out code'
         uses: actions/checkout@v4
 
       - name: 'Install dependencies'
         run: |
-          sudo apt-get install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi g++-arm-none-eabi
 
       - name: 'Update Submodules'
         run: |
@@ -21,17 +30,19 @@ jobs:
           git submodule update --init --recursive
 
       - name: 'Configure'
+        # -B erstellt den Build-Ordner pro Board
+        # -DPICO_BOARD übergibt dem Pico SDK die korrekte Zielarchitektur
         run: |
-          mkdir -p build
-          cmake -B build
+          cmake -B build-${{ matrix.board }} -S . -DPICO_BOARD=${{ matrix.board }}
 
       - name: 'Build'
         run: |
-          make -C build
+          cmake --build build-${{ matrix.board }} --parallel $(nproc)
 
       - name: 'Upload binary'
         uses: actions/upload-artifact@v4
         with:
-          name: pico-uart-bridge.uf2
-          path: build/uart_bridge.uf2
+          # Speichert die UF2-Dateien getrennt als pico und pico2 in GitHub ab
+          name: uart-bridge-${{ matrix.board }}
+          path: build-${{ matrix.board }}/*.uf2
           retention-days: 5
