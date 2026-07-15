@@ -26,6 +26,7 @@ typedef struct {
 	void *irq_fn;
 	uint8_t tx_pin;
 	uint8_t rx_pin;
+	int8_t tx_en_pin; // NEU: Pin für Transmit Enable (-1 wenn ungenutzt)
 } uart_id_t;
 
 typedef struct {
@@ -50,12 +51,14 @@ const uart_id_t UART_ID[CFG_TUD_CDC] = {
 		.irq_fn = &uart0_irq_fn,
 		.tx_pin = 16,
 		.rx_pin = 17,
+		.tx_en_pin = -1, // Vollduplex (Standard)
 	}, {
 		.inst = uart1,
 		.irq = UART1_IRQ,
 		.irq_fn = &uart1_irq_fn,
-		.tx_pin = 4,
-		.rx_pin = 5,
+		.tx_pin = 4,     // UART1 TX
+		.rx_pin = 5,     // UART1 RX
+		.tx_en_pin = 3,  // GP3 als Tx Enable (Pin 5 physisch) für L6362A
 	}
 };
 
@@ -64,36 +67,27 @@ uart_data_t UART_DATA[CFG_TUD_CDC];
 static inline uint databits_usb2uart(uint8_t data_bits)
 {
 	switch (data_bits) {
-		case 5:
-			return 5;
-		case 6:
-			return 6;
-		case 7:
-			return 7;
-		default:
-			return 8;
+		case 5: return 5;
+		case 6: return 6;
+		case 7: return 7;
+		default: return 8;
 	}
 }
 
 static inline uart_parity_t parity_usb2uart(uint8_t usb_parity)
 {
 	switch (usb_parity) {
-		case 1:
-			return UART_PARITY_ODD;
-		case 2:
-			return UART_PARITY_EVEN;
-		default:
-			return UART_PARITY_NONE;
+		case 1: return UART_PARITY_ODD;
+		case 2: return UART_PARITY_EVEN;
+		default: return UART_PARITY_NONE;
 	}
 }
 
 static inline uint stopbits_usb2uart(uint8_t stop_bits)
 {
 	switch (stop_bits) {
-		case 2:
-			return 2;
-		default:
-			return 1;
+		case 2: return 2;
+		default: return 1;
 	}
 }
 
@@ -129,16 +123,13 @@ void usb_read_bytes(uint8_t itf)
 	uart_data_t *ud = &UART_DATA[itf];
 	uint32_t len = tud_cdc_n_available(itf);
 
-	if (len &&
-	    mutex_try_enter(&ud->usb_mtx, NULL)) {
+	if (len && mutex_try_enter(&ud->usb_mtx, NULL)) {
 		len = MIN(len, BUFFER_SIZE - ud->usb_pos);
 		if (len) {
 			uint32_t count;
-
 			count = tud_cdc_n_read(itf, &ud->usb_buffer[ud->usb_pos], len);
 			ud->usb_pos += count;
 		}
-
 		mutex_exit(&ud->usb_mtx);
 	}
 }
@@ -147,8 +138,7 @@ void usb_write_bytes(uint8_t itf)
 {
 	uart_data_t *ud = &UART_DATA[itf];
 
-	if (ud->uart_pos &&
-	    mutex_try_enter(&ud->uart_mtx, NULL)) {
+	if (ud->uart_pos && mutex_try_enter(&ud->uart_mtx, NULL)) {
 		uint32_t count;
 
 		count = tud_cdc_n_write(itf, ud->uart_buffer, ud->uart_pos);
@@ -229,15 +219,47 @@ void uart_write_bytes(uint8_t itf)
 {
 	uart_data_t *ud = &UART_DATA[itf];
 
-	if (ud->usb_pos &&
-	    mutex_try_enter(&ud->usb_mtx, NULL)) {
+	if (ud->usb_pos && mutex_try_enter(&ud->usb_mtx, NULL)) {
 		const uart_id_t *ui = &UART_ID[itf];
 		uint32_t count = 0;
 
-		while (uart_is_writable(ui->inst) &&
-		       count < ud->usb_pos) {
-			uart_putc_raw(ui->inst, ud->usb_buffer[count]);
-			count++;
+		if (ui->tx_en_pin >= 0) {
+			// --- HALBDUPLEX LOGIK ---
+			
+			// 1. RX-Interrupt stoppen, um lokale Echos des L6362A zu ignorieren
+			irq_set_enabled(ui->irq, false);
+			
+			// 2. Transceiver auf Senden umschalten
+			gpio_put(ui->tx_en_pin, 1);
+			
+			// 3. Puffer blockierend ins UART-Register feuern
+			while (count < ud->usb_pos) {
+				if (uart_is_writable(ui->inst)) {
+					uart_putc_raw(ui->inst, ud->usb_buffer[count]);
+					count++;
+				}
+			}
+			
+			// 4. WARTEN bis das letzte Bit physisch auf der Leitung ist!
+			uart_tx_wait_blocking(ui->inst);
+			
+			// 5. Transceiver sofort wieder auf Empfang stellen
+			gpio_put(ui->tx_en_pin, 0);
+			
+			// 6. RX-Hardware-FIFO leeren (löscht evtl. gespiegeltes Echo)
+			while (uart_is_readable(ui->inst)) {
+				uart_getc(ui->inst);
+			}
+			
+			// 7. RX-Interrupt wieder scharf schalten
+			irq_set_enabled(ui->irq, true);
+			
+		} else {
+			// --- VOLLDUPLEX LOGIK (Original) ---
+			while (uart_is_writable(ui->inst) && count < ud->usb_pos) {
+				uart_putc_raw(ui->inst, ud->usb_buffer[count]);
+				count++;
+			}
 		}
 
 		if (count < ud->usb_pos)
@@ -257,6 +279,13 @@ void init_uart_data(uint8_t itf)
 	/* Pinmux */
 	gpio_set_function(ui->tx_pin, GPIO_FUNC_UART);
 	gpio_set_function(ui->rx_pin, GPIO_FUNC_UART);
+
+	/* Tx Enable Pin initialisieren, falls genutzt */
+	if (ui->tx_en_pin >= 0) {
+		gpio_init(ui->tx_en_pin);
+		gpio_set_dir(ui->tx_en_pin, GPIO_OUT);
+		gpio_put(ui->tx_en_pin, 0); /* Standardmäßig im Empfangsmodus */
+	}
 
 	/* USB CDC LC */
 	ud->usb_lc.bit_rate = DEF_BIT_RATE;
@@ -305,8 +334,10 @@ int main(void)
 	gpio_init(LED_PIN);
 	gpio_set_dir(LED_PIN, GPIO_OUT);
 
+	// Core 1 kümmert sich um die USB (TinyUSB) Abwicklung
 	multicore_launch_core1(core1_entry);
 
+	// Core 0 kümmert sich um das Hin- und Herschaufeln auf den UARTs
 	while (1) {
 		for (itf = 0; itf < CFG_TUD_CDC; itf++) {
 			update_uart_cfg(itf);
