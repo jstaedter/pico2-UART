@@ -286,6 +286,8 @@ void init_uart_data(uint8_t itf)
 	if (ui->invert) {
 		gpio_set_outover(ui->tx_pin, GPIO_OVERRIDE_INVERT);
 		gpio_set_inover(ui->rx_pin, GPIO_OVERRIDE_INVERT);
+
+		gpio_pull_down(ui->rx_pin);
 	}
 
 	/* Tx Enable Pin initialisieren, falls genutzt */
