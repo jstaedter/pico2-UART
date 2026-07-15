@@ -26,7 +26,8 @@ typedef struct {
 	void *irq_fn;
 	uint8_t tx_pin;
 	uint8_t rx_pin;
-	int8_t tx_en_pin; // NEU: Pin für Transmit Enable (-1 wenn ungenutzt)
+	int8_t tx_en_pin;
+	bool invert;
 } uart_id_t;
 
 typedef struct {
@@ -52,6 +53,7 @@ const uart_id_t UART_ID[CFG_TUD_CDC] = {
 		.tx_pin = 16,
 		.rx_pin = 17,
 		.tx_en_pin = -1, // Vollduplex (Standard)
+		.invert = false,
 	}, {
 		.inst = uart1,
 		.irq = UART1_IRQ,
@@ -59,6 +61,7 @@ const uart_id_t UART_ID[CFG_TUD_CDC] = {
 		.tx_pin = 4,     // UART1 TX
 		.rx_pin = 5,     // UART1 RX
 		.tx_en_pin = 3,  // GP3 als Tx Enable (Pin 5 physisch) für L6362A
+		.invert = true,  // UART1: Hardware-Invertierung aktiv (für L6362A)
 	}
 };
 
@@ -279,6 +282,11 @@ void init_uart_data(uint8_t itf)
 	/* Pinmux */
 	gpio_set_function(ui->tx_pin, GPIO_FUNC_UART);
 	gpio_set_function(ui->rx_pin, GPIO_FUNC_UART);
+
+	if (ui->invert) {
+		gpio_set_outover(ui->tx_pin, GPIO_OVERRIDE_INVERT);
+		gpio_set_inover(ui->rx_pin, GPIO_OVERRIDE_INVERT);
+	}
 
 	/* Tx Enable Pin initialisieren, falls genutzt */
 	if (ui->tx_en_pin >= 0) {
