@@ -29,8 +29,9 @@ jobs:
           git submodule update --init --recursive
 
       - name: 'Configure'
+        # Lädt das Pico SDK automatisch herunter, falls es lokal nicht gefunden wird
         run: |
-          cmake -B build-${{ matrix.board }} -S . -DPICO_BOARD=${{ matrix.board }}
+          cmake -B build-${{ matrix.board }} -S . -DPICO_BOARD=${{ matrix.board }} -DPICO_SDK_FETCH_FROM_GIT=on
 
       - name: 'Build'
         run: |
